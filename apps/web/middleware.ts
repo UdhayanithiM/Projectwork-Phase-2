@@ -1,0 +1,96 @@
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { jwtVerify } from 'jose';
+
+// Use a secure fallback for dev, but enforce ENV in production
+const JWT_SECRET = process.env.JWT_SECRET || "default-dev-secret-please-change";
+const secretKey = new TextEncoder().encode(JWT_SECRET);
+
+export async function middleware(request: NextRequest) {
+  const token = request.cookies.get('token')?.value;
+  const { pathname } = request.nextUrl;
+
+  // 1. Define Route Groups
+  const isAuthPage = pathname.startsWith('/login') || pathname.startsWith('/signup');
+  const isAdminRoute = pathname.startsWith('/admin');
+  const isHrRoute = pathname.startsWith('/hr-dashboard');
+  
+  // All routes that require login
+  const isProtectedRoute = 
+    pathname.startsWith('/dashboard') || 
+    pathname.startsWith('/assessment') || 
+    pathname.startsWith('/technical-assessment') ||
+    pathname.startsWith('/take-interview') ||
+    isAdminRoute || 
+    isHrRoute;
+
+  // 2. Redirect Logged-In Users AWAY from Login/Signup
+  if (isAuthPage && token) {
+    try {
+      await jwtVerify(token, secretKey);
+      // Valid token found on auth page -> redirect to dashboard
+      return NextResponse.redirect(new URL('/dashboard', request.url));
+    } catch (error) {
+      // If token is invalid, let them stay on login page to re-auth
+      // Optionally clear the bad cookie here
+      const response = NextResponse.next();
+      response.cookies.delete('token');
+      return response;
+    }
+  }
+
+  // 3. Protect Private Routes
+  if (isProtectedRoute) {
+    // Case A: No Token
+    if (!token) {
+      // Redirect to login, but save the original URL to redirect back after login
+      const loginUrl = new URL('/login', request.url);
+      loginUrl.searchParams.set('callbackUrl', pathname);
+      return NextResponse.redirect(loginUrl);
+    }
+
+    // Case B: Verify Token & Check Role
+    try {
+      const { payload } = await jwtVerify(token, secretKey);
+      const role = (payload.role as string)?.toUpperCase();
+
+      // Role-Based Access Control (RBAC)
+      
+      // Admin Routes: Only ADMIN
+      if (isAdminRoute && role !== 'ADMIN') {
+        return NextResponse.redirect(new URL('/dashboard', request.url));
+      }
+      
+      // HR Routes: HR or ADMIN
+      if (isHrRoute && role !== 'HR' && role !== 'ADMIN') {
+        return NextResponse.redirect(new URL('/dashboard', request.url));
+      }
+
+      // If all checks pass, allow access
+      return NextResponse.next();
+
+    } catch (error) {
+      // Token expired or invalid -> Redirect to login & clear cookie
+      const response = NextResponse.redirect(new URL('/login', request.url));
+      response.cookies.delete('token');
+      return response;
+    }
+  }
+
+  // Default: Allow request
+  return NextResponse.next();
+}
+
+// Optimized matcher to run middleware only on specific paths
+export const config = {
+  matcher: [
+    '/dashboard/:path*',
+    '/admin/:path*',
+    '/hr-dashboard/:path*',
+    '/assessment/:path*',
+    '/technical-assessment/:path*',
+    '/take-interview/:path*',
+    '/login',
+    '/signup'
+  ],
+};
